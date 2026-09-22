@@ -181,7 +181,6 @@ function startAdsBot() {
         .setTimestamp();
 
       await announceChannel.send({ embeds: [introEmbed] });
-      await sendMentionBelow(announceChannel);
 
       for (let i = 0; i < products.length; i++) {
         const { channel, categoryName } = products[i];
@@ -211,6 +210,8 @@ function startAdsBot() {
 
         if (i < products.length - 1) await sleep(PER_PRODUCT_DELAY_MS);
       }
+
+      await sendMentionBelow(announceChannel);
     } catch (err) {
       console.error('❌ [โฆษณา] เกิดข้อผิดพลาดตอนเตือนซ้ำ:', err);
     } finally {
