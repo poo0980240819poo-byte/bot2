@@ -26,9 +26,37 @@ const PER_CHANNEL_COOLDOWN_MS = Number(process.env.ADS_COOLDOWN_MS) || 60 * 1000
 // ทุกกี่มิลลิวินาที ให้เตือนซ้ำเรื่องสินค้าที่มีอยู่แล้วทั้งหมด (ค่าเริ่มต้น 5 ชั่วโมง)
 const REMINDER_INTERVAL_MS = Number(process.env.ADS_REMINDER_INTERVAL_MS) || 5 * 60 * 60 * 1000;
 
+// เว้นจังหวะระหว่างการ์ดโฆษณาแต่ละใบตอนไล่โพสต์ทีละสินค้า (มิลลิวินาที) กันดูเป็นสแปม
+const PER_PRODUCT_DELAY_MS = Number(process.env.ADS_PER_PRODUCT_DELAY_MS) || 3000;
+
 const GUILD_ID = process.env.GUILD_ID;
 
-const COLOR_ANNOUNCE = 0xeb459e; // ชมพูสด เด่นสะดุดตา
+const COLOR_ANNOUNCE = 0xeb459e; // ชมพูสด เด่นสะดุดตา — ใช้กับประกาศ "มีสินค้าใหม่" และหัวข้อสรุป
+
+// สีวนสำหรับการ์ดโฆษณาแต่ละสินค้า ให้แต่ละใบดูมีชีวิตชีวาไม่จำเจ
+const COLOR_PALETTE = [0xeb459e, 0x57f287, 0x5865f2, 0xfee75c, 0xed4245, 0xeb8e34, 0x1abc9c];
+
+function pickColor(i) {
+  return COLOR_PALETTE[i % COLOR_PALETTE.length];
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ดาวน์โหลดรูปมาแนบไฟล์ใหม่เอง กันลิงก์ CDN ของ Discord หมดอายุทีหลัง
+async function downloadAsAttachment(url, baseName) {
+  try {
+    const res = await fetch(url);
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const ext = (url.split('?')[0].split('.').pop() || 'png').toLowerCase();
+    const fileName = `${baseName}.${ext}`;
+    return { attachment: buffer, name: fileName };
+  } catch (err) {
+    console.error('[โฆษณา] ดาวน์โหลดรูปไม่สำเร็จ:', err.message);
+    return null;
+  }
+}
 
 function startAdsBot() {
   const client = new Client({
@@ -41,6 +69,7 @@ function startAdsBot() {
   });
 
   const lastAnnouncedAt = new Map(); // channelId -> timestamp กันประกาศซ้ำถี่
+  let isSendingReminder = false; // กันไม่ให้ไล่โพสต์สินค้าซ้อนกันถ้ารอบก่อนยังไม่จบ
 
   client.once('ready', () => {
     console.log(`📢 [โฆษณา] ล็อกอินสำเร็จในชื่อ ${client.user.tag}`);
@@ -65,10 +94,44 @@ function startAdsBot() {
   }
 
   // ----------------------------------------------------------------------
-  // 🔁 เตือนซ้ำทุก REMINDER_INTERVAL_MS — รวบรวมห้องสินค้าที่มีอยู่ทั้งหมด (ทั้งเก่า/ใหม่)
-  // แล้วส่งเป็นลิสต์เตือนความจำไปห้องประกาศ กันลูกค้าลืมว่ามีสินค้าอะไรขายอยู่บ้าง
+  // 🔍 ไปอ่านห้องสินค้าแต่ละห้อง ดึงคำอธิบาย (สรรพคุณ) + รูปสินค้ามาให้
+  // ลำดับการหา: ข้อความที่ปักหมุดไว้ก่อน (ปกติแอดมินจะปักคำโปรยสินค้าไว้)
+  // ถ้าไม่มีปักหมุด ก็ไล่หาข้อความล่าสุดที่มีเนื้อหา/รูปแทน
+  // ----------------------------------------------------------------------
+  async function fetchProductInfo(channel) {
+    try {
+      const pinned = await channel.messages.fetchPinned().catch(() => null);
+      let source = pinned && pinned.size > 0 ? pinned.first() : null;
+
+      if (!source) {
+        const recent = await channel.messages.fetch({ limit: 20 }).catch(() => null);
+        source = recent?.find((m) => !m.author.bot && (m.content?.trim() || m.attachments.size > 0)) || null;
+      }
+
+      if (!source) return { text: '', file: null };
+
+      let imageUrl = null;
+      const attachedImage = source.attachments.find((a) => a.contentType?.startsWith('image/'));
+      if (attachedImage) imageUrl = attachedImage.url;
+      else if (source.embeds?.[0]?.image?.url) imageUrl = source.embeds[0].image.url;
+      else if (source.embeds?.[0]?.thumbnail?.url) imageUrl = source.embeds[0].thumbnail.url;
+
+      const file = imageUrl ? await downloadAsAttachment(imageUrl, `product-${channel.id}`) : null;
+
+      return { text: source.content?.trim() || '', file };
+    } catch (err) {
+      console.error(`[โฆษณา] ดึงข้อมูลห้อง #${channel.name} ไม่สำเร็จ:`, err.message);
+      return { text: '', file: null };
+    }
+  }
+
+  // ----------------------------------------------------------------------
+  // 🔁 เตือนซ้ำทุก REMINDER_INTERVAL_MS — ไล่โพสต์การ์ดโฆษณาทีละสินค้า
+  // ดึงรูป + คำอธิบายจากห้องสินค้าจริงมาทำเป็นการ์ดสวยๆ ให้เอง
   // ----------------------------------------------------------------------
   async function sendProductReminder() {
+    if (isSendingReminder) return;
+    isSendingReminder = true;
     try {
       if (!ANNOUNCE_CHANNEL_ID || !GUILD_ID) return;
 
@@ -83,48 +146,64 @@ function startAdsBot() {
 
       const allChannels = await guild.channels.fetch();
 
-      // จัดกลุ่มห้องสินค้าตามหมวดหมู่ ให้อ่านง่าย
-      const groups = new Map(); // categoryName -> [channelMention, ...]
-      const ungrouped = [];
-
+      const products = [];
       for (const channel of allChannels.values()) {
         if (!channel || channel.type !== 0) continue; // เฉพาะห้องข้อความ (GuildText = 0)
         if (!isWatchedChannel(channel)) continue;
-
-        if (channel.parentId && WATCH_CATEGORY_IDS.has(channel.parentId)) {
-          const category = allChannels.get(channel.parentId);
-          const groupName = category?.name ?? 'สินค้า';
-          if (!groups.has(groupName)) groups.set(groupName, []);
-          groups.get(groupName).push(`<#${channel.id}>`);
-        } else {
-          ungrouped.push(`<#${channel.id}>`);
-        }
+        const categoryName = channel.parentId
+          ? (allChannels.get(channel.parentId)?.name ?? 'สินค้า')
+          : 'สินค้า';
+        products.push({ channel, categoryName });
       }
 
-      if (groups.size === 0 && ungrouped.length === 0) return; // ไม่มีห้องสินค้าให้เตือนเลย
+      if (products.length === 0) return; // ไม่มีห้องสินค้าให้เตือนเลย
 
-      let listText = '';
-      for (const [groupName, mentions] of groups) {
-        listText += `\n**📁 ${groupName}**\n${mentions.join('  ')}\n`;
-      }
-      if (ungrouped.length > 0) {
-        listText += `\n**📁 อื่นๆ**\n${ungrouped.join('  ')}\n`;
-      }
-
-      const embed = new EmbedBuilder()
+      const introEmbed = new EmbedBuilder()
         .setColor(COLOR_ANNOUNCE)
-        .setAuthor({ name: '🔁 เตือนความจำ: สินค้าที่มีตอนนี้', iconURL: client.user.displayAvatarURL() })
-        .setDescription(listText.trim())
+        .setAuthor({ name: '🔁 เตือนความจำ: รวมสินค้าทั้งหมดที่มีตอนนี้', iconURL: client.user.displayAvatarURL() })
+        .setThumbnail(guild.iconURL() || null)
+        .setDescription(`มีสินค้าทั้งหมด **${products.length}** รายการ กำลังไล่แนะนำให้ทีละอย่างครับ 👇`)
         .setFooter({ text: 'ระบบแจ้งเตือนสินค้าใหม่ · เตือนซ้ำอัตโนมัติ' })
         .setTimestamp();
 
       await announceChannel.send({
         content: MENTION_ROLE_ID ? `<@&${MENTION_ROLE_ID}>` : undefined,
-        embeds: [embed],
+        embeds: [introEmbed],
         allowedMentions: MENTION_ROLE_ID ? { roles: [MENTION_ROLE_ID] } : undefined,
       });
+
+      for (let i = 0; i < products.length; i++) {
+        const { channel, categoryName } = products[i];
+        const info = await fetchProductInfo(channel);
+
+        const embed = new EmbedBuilder()
+          .setColor(pickColor(i))
+          .setAuthor({ name: `📦 สินค้าที่ ${i + 1}/${products.length}`, iconURL: client.user.displayAvatarURL() })
+          .setTitle(`✨ ${channel.name.replace(/[-_]/g, ' ')}`)
+          .setDescription(
+            (info.text ? `${info.text}\n\n` : 'ยังไม่มีคำโปรยสินค้า สามารถปักหมุดข้อความในห้องนี้เพื่อให้บอทดึงมาโชว์ได้ครับ\n\n') +
+            `🛍️ ดูรายละเอียด/สั่งซื้อได้ที่ <#${channel.id}>`,
+          )
+          .addFields({ name: '📁 หมวดหมู่', value: categoryName, inline: true })
+          .setFooter({ text: 'ระบบแจ้งเตือนสินค้าใหม่' })
+          .setTimestamp();
+
+        const files = [];
+        if (info.file) {
+          files.push(info.file);
+          embed.setImage(`attachment://${info.file.name}`);
+        }
+
+        await announceChannel.send({ embeds: [embed], files }).catch((err) => {
+          console.error(`[โฆษณา] ส่งโฆษณาห้อง #${channel.name} ไม่สำเร็จ:`, err.message);
+        });
+
+        if (i < products.length - 1) await sleep(PER_PRODUCT_DELAY_MS);
+      }
     } catch (err) {
       console.error('❌ [โฆษณา] เกิดข้อผิดพลาดตอนเตือนซ้ำ:', err);
+    } finally {
+      isSendingReminder = false;
     }
   }
 
@@ -154,29 +233,33 @@ function startAdsBot() {
         return;
       }
 
+      const categoryName = message.channel.parentId
+        ? message.guild.channels.cache.get(message.channel.parentId)?.name ?? null
+        : null;
+
       const embed = new EmbedBuilder()
         .setColor(COLOR_ANNOUNCE)
         .setAuthor({ name: '📢 มีสินค้าใหม่ / อัปเดตสินค้า!', iconURL: client.user.displayAvatarURL() })
+        .setTitle(`✨ ${message.channel.name.replace(/[-_]/g, ' ')}`)
         .setDescription(
-          `🛍️ เข้าไปดูกันเลยที่ <#${message.channel.id}>\n\n` +
-          (message.content?.trim() ? `💬 ${message.content.trim()}` : ''),
+          (message.content?.trim() ? `💬 ${message.content.trim()}\n\n` : '') +
+          `🛍️ เข้าไปดูกันเลยที่ <#${message.channel.id}>`,
         )
         .setFooter({ text: 'ระบบแจ้งเตือนสินค้าใหม่' })
         .setTimestamp();
 
+      if (categoryName) {
+        embed.addFields({ name: '📁 หมวดหมู่', value: categoryName, inline: true });
+      }
+
       const files = [];
       const firstImage = message.attachments.find((a) => a.contentType?.startsWith('image/'));
       if (firstImage) {
-        // ดาวน์โหลดรูปมาอัปโหลดใหม่เอง กันลิงก์ CDN หมดอายุทีหลัง (เหมือนที่แก้ไว้ในบอทโอนเงิน)
-        try {
-          const res = await fetch(firstImage.url);
-          const buffer = Buffer.from(await res.arrayBuffer());
-          const ext = (firstImage.name?.split('.').pop() || 'png').toLowerCase();
-          const fileName = `product.${ext}`;
-          files.push({ attachment: buffer, name: fileName });
-          embed.setImage(`attachment://${fileName}`);
-        } catch (err) {
-          console.error('[โฆษณา] ดาวน์โหลดรูปสินค้าไม่สำเร็จ:', err.message);
+        // ดาวน์โหลดรูปมาอัปโหลดใหม่เอง กันลิงก์ CDN หมดอายุทีหลัง
+        const file = await downloadAsAttachment(firstImage.url, 'product');
+        if (file) {
+          files.push(file);
+          embed.setImage(`attachment://${file.name}`);
         }
       }
 
