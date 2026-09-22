@@ -44,6 +44,20 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// ส่งแท็กยศเป็นข้อความแยกต่างหาก "หลัง" การ์ดโฆษณา เพื่อให้แท็กไปโผล่อยู่บรรทัดล่างสุด
+// (Discord ไม่รองรับ content ใต้ embed ในข้อความเดียวกัน เลยต้องแยกส่ง)
+async function sendMentionBelow(channel) {
+  if (!MENTION_ROLE_ID) return;
+  try {
+    await channel.send({
+      content: `<@&${MENTION_ROLE_ID}>`,
+      allowedMentions: { roles: [MENTION_ROLE_ID] },
+    });
+  } catch (err) {
+    console.error('[โฆษณา] ส่งแท็กยศไม่สำเร็จ:', err.message);
+  }
+}
+
 // ดาวน์โหลดรูปมาแนบไฟล์ใหม่เอง กันลิงก์ CDN ของ Discord หมดอายุทีหลัง
 async function downloadAsAttachment(url, baseName) {
   try {
@@ -166,11 +180,8 @@ function startAdsBot() {
         .setFooter({ text: 'ระบบแจ้งเตือนสินค้าใหม่ · เตือนซ้ำอัตโนมัติ' })
         .setTimestamp();
 
-      await announceChannel.send({
-        content: MENTION_ROLE_ID ? `<@&${MENTION_ROLE_ID}>` : undefined,
-        embeds: [introEmbed],
-        allowedMentions: MENTION_ROLE_ID ? { roles: [MENTION_ROLE_ID] } : undefined,
-      });
+      await announceChannel.send({ embeds: [introEmbed] });
+      await sendMentionBelow(announceChannel);
 
       for (let i = 0; i < products.length; i++) {
         const { channel, categoryName } = products[i];
@@ -263,12 +274,8 @@ function startAdsBot() {
         }
       }
 
-      await announceChannel.send({
-        content: MENTION_ROLE_ID ? `<@&${MENTION_ROLE_ID}>` : undefined,
-        embeds: [embed],
-        files,
-        allowedMentions: MENTION_ROLE_ID ? { roles: [MENTION_ROLE_ID] } : undefined,
-      });
+      await announceChannel.send({ embeds: [embed], files });
+      await sendMentionBelow(announceChannel);
     } catch (err) {
       console.error('❌ [โฆษณา] เกิดข้อผิดพลาดใน messageCreate:', err);
     }
@@ -286,4 +293,3 @@ function startAdsBot() {
 }
 
 module.exports = { startAdsBot };
-
