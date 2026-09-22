@@ -27,7 +27,7 @@ const PER_CHANNEL_COOLDOWN_MS = Number(process.env.ADS_COOLDOWN_MS) || 60 * 1000
 const REMINDER_INTERVAL_MS = Number(process.env.ADS_REMINDER_INTERVAL_MS) || 5 * 60 * 60 * 1000;
 
 // เว้นจังหวะระหว่างการ์ดโฆษณาแต่ละใบตอนไล่โพสต์ทีละสินค้า (มิลลิวินาที) กันดูเป็นสแปม
-const PER_PRODUCT_DELAY_MS = Number(process.env.ADS_PER_PRODUCT_DELAY_MS) || 3000;
+const PER_PRODUCT_DELAY_MS = Number(process.env.ADS_PER_PRODUCT_DELAY_MS) || 20000;
 
 const GUILD_ID = process.env.GUILD_ID;
 
