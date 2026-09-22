@@ -1,0 +1,19 @@
+{
+  "name": "merged-discord-bots",
+  "version": "1.0.0",
+  "description": "Review bot + Payment (โอนเงิน) bot + Status bot รันรวมกันใน service เดียว (ประหยัดค่า Railway)",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node deploy-commands.js && node index.js",
+    "deploy": "node deploy-commands.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
